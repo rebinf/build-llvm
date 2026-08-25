@@ -1,0 +1,364 @@
+# Builds LLVM for several machines and puts the result out as a release, so a
+# project that needs LLVM downloads one rather than having one installed.
+#
+# What comes out is an install prefix, not a pile of files: include/, lib/, and
+# lib/cmake. That is what 'find_package(LLVM CONFIG)' wants, so a build using
+# it points CMAKE_PREFIX_PATH at the unpacked directory and changes nothing
+# else.
+#
+# Everything opinionated is an input. The defaults suit a project that calls
+# the C API and links lld, and every one of them can be widened at the cost of
+# build time and size.
+#
+# None of this has been run. Build time, asset size, and whether the C API
+# library still comes out with the tools off are what a first run settles.
+name: Build LLVM
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A tag from llvm-project. Leave empty for its latest release.
+        required: false
+        default: ''
+      targets:
+        description: Back ends to build, semicolon separated, or 'all'.
+        required: true
+        default: X86;AArch64
+      projects:
+        description: Sub-projects to build, semicolon separated. Empty for none.
+        required: false
+        default: lld
+      system-libraries:
+        description: Build against zlib, zstd and libxml2. Off means nothing has to travel beside the result.
+        type: boolean
+        default: false
+      bindings:
+        description: Generate C# bindings for the C API from the headers this build produced.
+        type: boolean
+        default: true
+      draft:
+        description: Make the release a draft rather than publishing it.
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Settled once and handed to everything else, so that a run left to pick the
+  # latest cannot have one machine build one version and another a newer one.
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.settle.outputs.tag }}
+      version: ${{ steps.settle.outputs.version }}
+
+    steps:
+      - name: Settle which LLVM this run is for
+        id: settle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASKED_FOR: ${{ inputs.version }}
+        run: |
+          tag="$ASKED_FOR"
+
+          if [ -z "$tag" ]; then
+            # The highest version, not the one published most recently. Those
+            # are different: GitHub calls the newest non-prerelease "latest",
+            # and llvm-project goes on patching the previous branch after a new
+            # one is out - so 22.1.9 landing after 23.1.0 would take the name
+            # and quietly build the older half of the project.
+            #
+            # Prereleases are dropped because every release candidate is
+            # tagged, and 'sort -V' orders what is left by version.
+            tag=$(gh api repos/llvm/llvm-project/releases --paginate --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' | sed 's/^llvmorg-//' | sort -V | tail -1)
+            tag="llvmorg-$tag"
+
+            echo "Nothing was asked for, so: $tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#llvmorg-}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    # LLVM is hours of work. 360 is the ceiling GitHub allows on a hosted
+    # runner, and a build that reaches it has gone wrong rather than been slow.
+    timeout-minutes: 360
+
+    strategy:
+      # One machine failing says nothing about the others, and rebuilding the
+      # whole matrix to get one of them is hours wasted each time.
+      fail-fast: false
+      matrix:
+        # The oldest image each machine still offers, on purpose. What is built
+        # here is run somewhere else, and a shared library built against a
+        # newer C library will not load against an older one - so the oldest
+        # image that is still supported is the one that reaches furthest.
+        # Newer images exist for all of these and none of them buys anything.
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+          # - name: windows-x64
+          #   runner: windows-2022
+          # - name: macos-arm64
+          #   runner: macos-14
+          # - name: macos-x64
+          #   runner: macos-15-intel
+          # The two arm runners are free on public repositories and billed on
+          # private ones. Drop them from here if that is the wrong trade.
+          # - name: windows-arm64
+          #   runner: windows-11-arm
+          # - name: linux-arm64
+          #   runner: ubuntu-22.04-arm
+
+    steps:
+      - name: Take the LLVM this run is for
+        uses: actions/checkout@v7
+        with:
+          repository: llvm/llvm-project
+          ref: ${{ needs.version.outputs.tag }}
+          path: llvm-project
+
+      - name: Say where the compiler is, on Windows
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # The system libraries are the ones worth understanding: LLVM built
+      # against zlib, zstd and libxml2 drags all three along as shared
+      # libraries that then have to sit beside whatever links it, and a set of
+      # them missing one loads no further than the first attempt. Built
+      # without, there is nothing to carry.
+      #
+      # An LLVM built with one back end still takes a triple naming another and
+      # only then says it knows nothing of it, so the target list is what "can
+      # be compiled for" means for whoever uses the result.
+      - name: Work out how to build it
+        shell: bash
+        env:
+          SYSTEM_LIBRARIES: ${{ inputs.system-libraries && 'ON' || 'OFF' }}
+          TARGETS: ${{ inputs.targets }}
+          PROJECTS: ${{ inputs.projects }}
+        run: |
+          # LLVM refuses to configure rather than working out how to package
+          # the C API, and wants it asked for differently on each machine:
+          # libLLVM.so already exports only the C API, MSVC cannot build it
+          # and needs the separate one, and Darwin wants both.
+          case "$RUNNER_OS" in
+            Windows) SHARED=(-DLLVM_BUILD_LLVM_C_DYLIB=ON) ;;
+            macOS)   SHARED=(-DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_BUILD_LLVM_C_DYLIB=ON) ;;
+            *)       SHARED=(-DLLVM_BUILD_LLVM_DYLIB=ON) ;;
+          esac
+
+          cmake -S llvm-project/llvm -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DLLVM_ENABLE_PROJECTS="$PROJECTS" \
+            -DLLVM_TARGETS_TO_BUILD="$TARGETS" \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_ZLIB="$SYSTEM_LIBRARIES" \
+            -DLLVM_ENABLE_ZSTD="$SYSTEM_LIBRARIES" \
+            -DLLVM_ENABLE_LIBXML2="$SYSTEM_LIBRARIES" \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_LIBPFM=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_UTILS=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_UTILS=OFF \
+            "${SHARED[@]}"
+
+      - name: Build it
+        run: cmake --build build --parallel
+
+      - name: Put it where it is going
+        run: cmake --install build
+
+      # The tools are not built rather than built and then deleted: it saves
+      # the build time as well as the size, and leaves no exported CMake target
+      # naming a file that is not there, which would stop 'find_package' rather
+      # than being ignored. What is kept is the C API shared library, which is
+      # what anything binding to LLVM loads by name.
+      - name: Say what was kept
+        shell: bash
+        run: |
+          ls -la install/bin || echo "nothing in bin, which is where only Windows puts anything"
+          ls -la install/lib
+
+      # A binding loads the library by the name 'LLVM-C'. Only Linux has no
+      # file of that name, so it fails at the first call rather than at build.
+      - name: Give the library the name a binding loads it by
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test -f install/lib/libLLVM.so
+          ln -s libLLVM.so install/lib/libLLVM-C.so
+          ls -la install/lib/libLLVM*
+
+      # Debug information in a static library is most of what it weighs, and a
+      # Release build against it reads none of it.
+      - name: Take the debug information out, where it can be taken out
+        if: runner.os != 'Windows'
+        shell: bash
+        run: find install/lib -name '*.a' -exec strip -S {} +
+
+      - name: Say how big it came out
+        shell: bash
+        run: du -sh install
+
+      - name: Wrap it up
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          MACHINE: ${{ matrix.name }}
+        run: |
+          asset="llvm-$VERSION-$MACHINE.tar.zst"
+
+          mv install llvm
+          tar -c llvm | zstd -19 -T0 -o "$asset"
+
+          # Read it back here, so an asset that will not open is a failed run
+          # rather than something found on the way into a release.
+          zstd -dc "$asset" | tar -t > /dev/null
+
+          ls -la "$asset"
+
+      - name: Hand it over
+        uses: actions/upload-artifact@v7
+        with:
+          name: llvm-${{ matrix.name }}
+          path: llvm-${{ needs.version.outputs.version }}-${{ matrix.name }}.tar.zst
+          # Compressed already, and asking the upload to do it again costs
+          # minutes and saves nothing.
+          compression-level: 0
+
+  # The declarations a C# caller of the C API needs, read out of the headers
+  # this run just built rather than taken from a package that tracks its own
+  # version. That is the point of doing it here: the declarations and the
+  # library cannot then disagree, and a mismatch between them fails at run time
+  # rather than at build - a removed export throws on first call, and a changed
+  # enum or layout does not throw at all.
+  bindings:
+    name: Bindings
+    needs: [version, build]
+    if: inputs.bindings
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Take the headers that were just built
+        uses: actions/download-artifact@v8
+        with:
+          name: llvm-linux-x64
+
+      - name: Unpack them
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: tar --zstd -xf "llvm-$VERSION-linux-x64.tar.zst"
+
+      # ClangSharp is versioned to match the LLVM it reads. Where there is no
+      # tool of exactly that version, the newest will read the headers
+      # perfectly well - it is a C parser, not a table of what LLVM contains.
+      - name: Fetch the generator
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          dotnet tool install --global ClangSharpPInvokeGenerator --version "$VERSION" \
+            || dotnet tool install --global ClangSharpPInvokeGenerator
+
+      - name: Read the declarations out of the headers
+        run: |
+          include="$PWD/llvm/include"
+          headers=$(find "$include/llvm-c" -name '*.h' | sort)
+
+          mkdir -p bindings
+
+          # libclang carries no builtin headers of its own, so without the
+          # resource directory of an installed clang every header that reaches
+          # stddef.h is skipped - which is all but four of them.
+          resource=$(clang -print-resource-dir)
+          test -f "$resource/include/stddef.h"
+
+          # Both --file and --traverse for every header: with --file alone the
+          # generator emits only what the named file declares itself, and the
+          # C API is spread across all of them.
+          ClangSharpPInvokeGenerator \
+            $(for one in $headers; do echo --file "$one"; done) \
+            $(for one in $headers; do echo --traverse "$one"; done) \
+            --file-directory "$include" \
+            --include-directory "$include" \
+            --resource-directory "$resource" \
+            --output bindings \
+            --namespace LLVM.Interop \
+            --library-path LLVM-C \
+            --method-class-name LLVM \
+            --config codegen=latest file=multi \
+            --generate helper-types \
+            2>&1 | tee generator.log || true
+
+          # The status is a count of warnings when the run went well and a
+          # negative number when it was not, and the shell cannot tell those
+          # apart once it has truncated them to a byte - so the log decides.
+          # A header it could not read is one it says it is skipping.
+          if grep -q '^Skipping \|^    Error ' generator.log; then
+            echo "the generator did not read every header"
+            exit 1
+          fi
+
+      - name: Say what came out
+        run: echo "$(ls bindings | wc -l) files, $(grep -rh DllImport bindings | wc -l) declarations"
+
+      - name: Wrap them up
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: tar -c bindings | zstd -19 -T0 -o "llvm-$VERSION-bindings-csharp.tar.zst"
+
+      - name: Hand them over
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-csharp
+          path: llvm-${{ needs.version.outputs.version }}-bindings-csharp.tar.zst
+          compression-level: 0
+
+  release:
+    name: Release
+    needs: [version, build, bindings]
+    runs-on: ubuntu-latest
+    # Whatever was built is worth releasing. A machine that failed is a machine
+    # to look at, not a reason to throw away the ones that worked - and the
+    # bindings being skipped is a choice rather than a failure.
+    if: always() && needs.build.result == 'success'
+
+    steps:
+      - name: Gather what was built
+        uses: actions/download-artifact@v8
+        with:
+          path: built
+          merge-multiple: true
+
+      - name: Put it out under the version it is
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          DRAFT: ${{ inputs.draft && '--draft' || '' }}
+          NOTES: "LLVM ${{ needs.version.outputs.version }}. Back ends: ${{ inputs.targets }}. Projects: ${{ inputs.projects }}. System libraries: ${{ inputs.system-libraries && 'on' || 'off' }}. No tools. Each asset unpacks to an 'llvm' install prefix - point CMAKE_PREFIX_PATH at it."
+        run: |
+          # Building the same version twice is an ordinary thing to do - a
+          # machine failed, or an option changed - so the second run replaces
+          # what the first put out rather than refusing.
+          if gh release view "$VERSION" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$VERSION" built/*.tar.zst --repo "$REPOSITORY" --clobber
+          else
+            gh release create "$VERSION" built/*.tar.zst \
+              --repo "$REPOSITORY" \
+              --title "LLVM $VERSION" \
+              --notes "$NOTES" \
+              $DRAFT
+          fi
