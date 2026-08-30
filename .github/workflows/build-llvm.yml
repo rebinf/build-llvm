@@ -10,8 +10,9 @@
 # the C API and links lld, and every one of them can be widened at the cost of
 # build time and size.
 #
-# None of this has been run. Build time, asset size, and whether the C API
-# library still comes out with the tools off are what a first run settles.
+# Linux has been run and the C API library does still come out with the tools
+# off. The other five machines have not, so what they cost and whether they
+# need anything of their own is still open.
 name: Build LLVM
 
 on:
@@ -100,21 +101,22 @@ jobs:
         # newer C library will not load against an older one - so the oldest
         # image that is still supported is the one that reaches furthest.
         # Newer images exist for all of these and none of them buys anything.
+        #
+        # The arm runners are free on public repositories and billed on private
+        # ones. Drop them from here if this repository ever stops being public.
         include:
           - name: linux-x64
             runner: ubuntu-22.04
-          # - name: windows-x64
-          #   runner: windows-2022
-          # - name: macos-arm64
-          #   runner: macos-14
-          # - name: macos-x64
-          #   runner: macos-15-intel
-          # The two arm runners are free on public repositories and billed on
-          # private ones. Drop them from here if that is the wrong trade.
-          # - name: windows-arm64
-          #   runner: windows-11-arm
-          # - name: linux-arm64
-          #   runner: ubuntu-22.04-arm
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+          - name: windows-x64
+            runner: windows-2022
+          - name: windows-arm64
+            runner: windows-11-arm
+          - name: macos-arm64
+            runner: macos-15
+          - name: macos-x64
+            runner: macos-15-intel
 
     steps:
       - name: Take the LLVM this run is for
@@ -127,6 +129,10 @@ jobs:
       - name: Say where the compiler is, on Windows
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          # It targets x64 whatever it is running on, so the arm runner has to
+          # say so or it builds an x64 LLVM and names it arm64.
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       # The system libraries are the ones worth understanding: LLVM built
       # against zlib, zstd and libxml2 drags all three along as shared
