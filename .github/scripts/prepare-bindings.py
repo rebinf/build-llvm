@@ -1,0 +1,182 @@
+"""Makes the generated bindings compile.
+
+They do not, as they come out of the generator, for two reasons that have
+nothing to do with each other. Both are dealt with here rather than left for
+whoever unpacks the asset, because every project that ever uses these would
+otherwise have to work them out again.
+
+Run as:
+
+    python prepare-bindings.py <directory> <targets> <namespace>
+
+where targets is what LLVM_TARGETS_TO_BUILD was given, semicolon separated, and
+namespace is the one the LLVM declarations were generated into - which is where
+the target-initialising ones have to join them.
+
+Idempotent: running it over an already-prepared directory does nothing.
+
+## One: every declaration is emitted more than once
+
+The generator is given every header as both --file and --traverse, which it has
+to be - with --file alone it emits only what each header declares itself, and
+the C API is spread across all of them. The cost is that a header pulled in by
+several others is emitted once per header that pulled it: 1871 extern
+declarations where 1195 are distinct, and 76 of 130 files repeating a type.
+
+**Whole declarations are compared, not names.** A declaration is dropped only
+where the same text has already been kept, so anything differing in any way at
+all survives. This cannot quietly choose between two declarations of one name:
+it keeps both and leaves the compiler to say so, which is the failure worth
+having.
+
+Working out an invocation that does not repeat itself would be better than
+taking the repeats out afterwards. Nobody has.
+
+## Two: twelve functions are called and never declared
+
+`LLVMInitializeAllTargets` and its five siblings call
+`LLVMInitializeX86Target` and one such name per back end. Those names are not
+written in any header: `llvm-c/Target.h` declares them by running a macro over
+the back ends the build was configured with, and the generator reads headers
+rather than expanding macros over a list it does not have.
+
+So they are written here, from the list this build was actually given. A build
+configured with other back ends gets other names, which is exactly why this
+cannot be a fixed file checked in somewhere.
+"""
+
+import io
+import os
+import re
+import sys
+
+# A type: its attributes, its declaration line, and the block under it.
+TYPE = re.compile(
+    r"(?:^[ \t]*\[[^\n]*\]\n)*"
+    r"^[ \t]*public (?:unsafe )?(?:static )?(?:partial )?(?:readonly )?"
+    r"(?:enum|struct|class) [A-Za-z0-9_]+[^\n{]*\n"
+    r"[ \t]*\{\n"
+    r"(?:.*?\n)*?"
+    r"[ \t]*\}\n",
+    re.MULTILINE,
+)
+
+# One extern: attributes, then a declaration ending in a semicolon.
+EXTERN = re.compile(
+    r"(?:^[ \t]*\[[^\n]*\]\n)+"
+    r"^[ \t]*public static extern [^\n]*;\n",
+    re.MULTILINE,
+)
+
+# One written-out function: attributes, a signature, and the block under it.
+#
+# A signature has to end in a closing bracket and name no type, or
+# 'public static unsafe partial class LLVM' reads as one and the whole class is
+# swallowed as a single function.
+FUNCTION = re.compile(
+    r"(?:^[ \t]*\[[^\n]*\]\n)*"
+    r"^([ \t]*)public static (?!extern)(?![^\n]*\b(?:class|struct|enum|interface)\b)"
+    r"[^\n{;]*\)[ \t]*\n"
+    r"[ \t]*\{\n"
+    r"(?:.*?\n)*?"
+    r"\1\}\n",
+    re.MULTILINE,
+)
+
+# What each back end is initialised for. LLVM declares one function per back end
+# per role, and the six wrappers call them in exactly these groups.
+ROLES = ["TargetInfo", "Target", "TargetMC", "AsmPrinter", "AsmParser", "Disassembler"]
+
+WRITTEN_BY_HAND = "TargetsTheBuildHas.cs"
+
+
+def deduplicated(text, pattern):
+    """Drops every match whose text has already been kept."""
+    kept = set()
+    pieces = []
+    at = 0
+
+    for match in pattern.finditer(text):
+        whole = match.group(0)
+
+        if whole in kept:
+            pieces.append(text[at:match.start()])
+            at = match.end()
+        else:
+            kept.add(whole)
+
+    pieces.append(text[at:])
+
+    return "".join(pieces)
+
+
+def targetsWritten(directory, namespace, targets):
+    """Writes the declarations the wrappers call and no header declares."""
+    lines = []
+
+    lines.append("using System.Runtime.InteropServices;")
+    lines.append("")
+    lines.append("namespace " + namespace)
+    lines.append("{")
+    lines.append("    /// The target-initialising functions the generated bindings")
+    lines.append("    /// call and no header declares.")
+    lines.append("    ///")
+    lines.append("    /// LLVM writes these with a macro over the back ends the build was")
+    lines.append("    /// configured with, so there is nothing in a header for a generator")
+    lines.append("    /// reading headers to find. These are written from the list this")
+    lines.append("    /// build was given: " + ", ".join(targets) + ".")
+    lines.append("    ///")
+    lines.append("    /// Generated, the same as everything beside it. Do not edit.")
+    lines.append("    public static unsafe partial class LLVM")
+    lines.append("    {")
+
+    for target in targets:
+        for role in ROLES:
+            lines.append('        [DllImport("LLVM-C", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]')
+            lines.append("        public static extern void LLVMInitialize" + target + role + "();")
+            lines.append("")
+
+    # The last blank line is the one before the closing brace.
+    lines.pop()
+
+    lines.append("    }")
+    lines.append("}")
+    lines.append("")
+
+    io.open(os.path.join(directory, WRITTEN_BY_HAND), "w", encoding="utf-8", newline="\n").write("\n".join(lines))
+
+
+def main():
+    directory = sys.argv[1]
+    targets = [one for one in sys.argv[2].replace(";", " ").split() if one and one != "all"]
+
+    namespace = sys.argv[3]
+    changed = 0
+
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".cs") or name == WRITTEN_BY_HAND:
+            continue
+
+        path = os.path.join(directory, name)
+        text = io.open(path, encoding="utf-8-sig", errors="strict").read()
+
+        # What is inside a type is taken first, so that what is left of a type
+        # is the same text wherever it was repeated.
+        after = deduplicated(deduplicated(deduplicated(text, EXTERN), FUNCTION), TYPE)
+
+        if after != text:
+            io.open(path, "w", encoding="utf-8", newline="\n").write(after)
+            changed = changed + 1
+
+    print("repeats taken out of %d files" % changed)
+
+    if not targets:
+        print("no back ends named, so nothing to declare for them")
+        return
+
+    targetsWritten(directory, namespace, targets)
+
+    print("declared %d target-initialising functions for %s" % (len(targets) * len(ROLES), ", ".join(targets)))
+
+
+main()

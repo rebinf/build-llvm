@@ -1,4 +1,4 @@
-# Builds LLVM for several machines and puts the result out as a release, so a
+# Builds LLVM for six machines and puts the result out as a release, so a
 # project that needs LLVM downloads one rather than having one installed.
 #
 # What comes out is an install prefix, not a pile of files: include/, lib/, and
@@ -6,49 +6,33 @@
 # it points CMAKE_PREFIX_PATH at the unpacked directory and changes nothing
 # else.
 #
-# Everything opinionated is an input. The defaults suit a project that calls
-# the C API and links lld, and every one of them can be widened at the cost of
-# build time and size.
-#
-# Linux has been run and the C API library does still come out with the tools
-# off. The other five machines have not, so what they cost and whether they
-# need anything of their own is still open.
+# **There is nothing to choose when running it.** It was written with an input
+# for everything opinionated, and every one of them has been settled: the
+# latest LLVM, X86 and AArch64, lld, no system libraries, bindings, and a
+# release rather than a draft. What that bought was a run where the only way to
+# get the wrong asset was to fill the form in wrong - which happened - against
+# nothing, since nobody wanted any other combination. Anyone who does can edit
+# the two lines below, in a commit that says why.
 name: Build LLVM
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: A tag from llvm-project. Leave empty for its latest release.
-        required: false
-        default: ''
-      targets:
-        description: Back ends to build, semicolon separated, or 'all'.
-        required: true
-        default: X86;AArch64
-      projects:
-        description: Sub-projects to build, semicolon separated. Empty for none.
-        required: false
-        default: lld
-      system-libraries:
-        description: Build against zlib, zstd and libxml2. Off means nothing has to travel beside the result.
-        type: boolean
-        default: false
-      bindings:
-        description: Generate C# bindings for the C API from the headers this build produced.
-        type: boolean
-        default: true
-      draft:
-        description: Make the release a draft rather than publishing it.
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
+env:
+  # Semicolon separated, or 'all'. What is not built here is a triple the
+  # result takes and then says it knows nothing of, so this is what "can be
+  # compiled for" comes to for whoever uses it.
+  TARGETS: X86;AArch64
+
+  # lld, so a project linking through it needs no linker of its own.
+  PROJECTS: lld
+
 jobs:
-  # Settled once and handed to everything else, so that a run left to pick the
-  # latest cannot have one machine build one version and another a newer one.
+  # Settled once and handed to everything else, so that a run cannot have one
+  # machine build one version and another a newer one.
   version:
     name: Version
     runs-on: ubuntu-latest
@@ -61,24 +45,19 @@ jobs:
         id: settle
         env:
           GH_TOKEN: ${{ github.token }}
-          ASKED_FOR: ${{ inputs.version }}
         run: |
-          tag="$ASKED_FOR"
+          # The highest version, not the one published most recently. Those
+          # are different: GitHub calls the newest non-prerelease "latest",
+          # and llvm-project goes on patching the previous branch after a new
+          # one is out - so 22.1.9 landing after 23.1.0 would take the name
+          # and quietly build the older half of the project.
+          #
+          # Prereleases are dropped because every release candidate is
+          # tagged, and 'sort -V' orders what is left by version.
+          tag=$(gh api repos/llvm/llvm-project/releases --paginate --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' | sed 's/^llvmorg-//' | sort -V | tail -1)
+          tag="llvmorg-$tag"
 
-          if [ -z "$tag" ]; then
-            # The highest version, not the one published most recently. Those
-            # are different: GitHub calls the newest non-prerelease "latest",
-            # and llvm-project goes on patching the previous branch after a new
-            # one is out - so 22.1.9 landing after 23.1.0 would take the name
-            # and quietly build the older half of the project.
-            #
-            # Prereleases are dropped because every release candidate is
-            # tagged, and 'sort -V' orders what is left by version.
-            tag=$(gh api repos/llvm/llvm-project/releases --paginate --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' | sed 's/^llvmorg-//' | sort -V | tail -1)
-            tag="llvmorg-$tag"
-
-            echo "Nothing was asked for, so: $tag"
-          fi
+          echo "Building $tag"
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#llvmorg-}" >> "$GITHUB_OUTPUT"
@@ -119,6 +98,11 @@ jobs:
             runner: macos-15-intel
 
     steps:
+      - name: Take this repository, for the shim
+        uses: actions/checkout@v7
+        with:
+          path: build-llvm
+
       - name: Take the LLVM this run is for
         uses: actions/checkout@v7
         with:
@@ -139,16 +123,8 @@ jobs:
       # libraries that then have to sit beside whatever links it, and a set of
       # them missing one loads no further than the first attempt. Built
       # without, there is nothing to carry.
-      #
-      # An LLVM built with one back end still takes a triple naming another and
-      # only then says it knows nothing of it, so the target list is what "can
-      # be compiled for" means for whoever uses the result.
       - name: Work out how to build it
         shell: bash
-        env:
-          SYSTEM_LIBRARIES: ${{ inputs.system-libraries && 'ON' || 'OFF' }}
-          TARGETS: ${{ inputs.targets }}
-          PROJECTS: ${{ inputs.projects }}
         run: |
           # LLVM refuses to configure rather than working out how to package
           # the C API, and wants it asked for differently on each machine:
@@ -166,12 +142,13 @@ jobs:
             -DLLVM_ENABLE_PROJECTS="$PROJECTS" \
             -DLLVM_TARGETS_TO_BUILD="$TARGETS" \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
-            -DLLVM_ENABLE_ZLIB="$SYSTEM_LIBRARIES" \
-            -DLLVM_ENABLE_ZSTD="$SYSTEM_LIBRARIES" \
-            -DLLVM_ENABLE_LIBXML2="$SYSTEM_LIBRARIES" \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
             -DLLVM_ENABLE_TERMINFO=OFF \
             -DLLVM_ENABLE_LIBEDIT=OFF \
             -DLLVM_ENABLE_LIBPFM=OFF \
+            -DLLVM_ENABLE_DIA_SDK=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -181,11 +158,44 @@ jobs:
             -DLLVM_BUILD_UTILS=OFF \
             "${SHARED[@]}"
 
+      # LLVM_ENABLE_DIA_SDK is off, and that one is not a size decision like
+      # the rest of them - **it is what makes the Windows asset usable at all.**
+      #
+      # Built with it on, LLVMDebugInfoPDB is exported carrying a link
+      # dependency on DIASDK::Diaguids, and LLVMConfig.cmake looks for the DIA
+      # SDK when it is loaded. On a machine that has not got it - which is any
+      # machine without a full Visual Studio - the target is never defined,
+      # find_package(LLVM) fails on a dangling target, and nothing downstream
+      # configures at all. The 23.1.0 asset went out that way and could not be
+      # built against on Windows.
+      #
+      # What is given up is reading PDBs through LLVM, which is a thing a
+      # debugger does rather than a thing a compiler does.
+
       - name: Build it
         run: cmake --build build --parallel
 
       - name: Put it where it is going
         run: cmake --install build
+
+      # lld has no C interface of its own - its entry points are C++ in static
+      # libraries, so nothing outside C++ can reach the linker however well it
+      # can reach the rest of LLVM through llvm-c. The shim is the whole of what
+      # fills that gap, and building it here rather than in whatever project
+      # wants it means: one build per platform instead of one per developer, no
+      # C++ toolchain needed downstream, and a shim that cannot be a version
+      # behind the LLVM it wraps.
+      #
+      # A configure of its own against the installed prefix, which is also the
+      # cheapest possible check that the prefix works: it finds LLVM and lld the
+      # same way every other consumer will.
+      - name: Build the C interface to lld
+        shell: bash
+        run: |
+          cmake -S build-llvm/shim -B shim-build -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_PREFIX_PATH="$PWD/install"             -DCMAKE_INSTALL_PREFIX="$PWD/install"
+
+          cmake --build shim-build --parallel
+          cmake --install shim-build
 
       # The tools are not built rather than built and then deleted: it saves
       # the build time as well as the size, and leaves no exported CMake target
@@ -208,8 +218,28 @@ jobs:
           ln -s libLLVM.so install/lib/libLLVM-C.so
           ls -la install/lib/libLLVM*
 
-      # Debug information in a static library is most of what it weighs, and a
-      # Release build against it reads none of it.
+      # What a project consuming this actually does first, and the failure it
+      # would otherwise meet hours later on its own machine. Cheap here: it
+      # reads the exported CMake and nothing more.
+      # Building the shim above already proved find_package works, this one
+      # having been what caught the DIA SDK. Kept as a step of its own because
+      # it says so in one line if it ever stops.
+      - name: Check the result can be built against
+        shell: bash
+        run: |
+          mkdir -p check
+          cd check
+
+          cat > CMakeLists.txt <<'END'
+          cmake_minimum_required(VERSION 3.20)
+          project(check LANGUAGES CXX)
+          find_package(LLVM REQUIRED CONFIG)
+          find_package(LLD REQUIRED CONFIG)
+          message(STATUS "found LLVM ${LLVM_PACKAGE_VERSION} and lld")
+          END
+
+          cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../install"
+
       - name: Take the debug information out, where it can be taken out
         if: runner.os != 'Windows'
         shell: bash
@@ -254,10 +284,12 @@ jobs:
   bindings:
     name: Bindings
     needs: [version, build]
-    if: inputs.bindings
     runs-on: ubuntu-latest
 
     steps:
+      - name: Take this repository, for the script that prepares them
+        uses: actions/checkout@v7
+
       - name: Take the headers that were just built
         uses: actions/download-artifact@v8
         with:
@@ -293,7 +325,16 @@ jobs:
 
           # Both --file and --traverse for every header: with --file alone the
           # generator emits only what the named file declares itself, and the
-          # C API is spread across all of them.
+          # C API is spread across all of them. The cost is that a header
+          # pulled in by several others is emitted once per header that pulled
+          # it, which the next step takes back out.
+          #
+          # The namespace is not LLVM.Interop, and that is deliberate. The class
+          # holding the declarations is called LLVM, so a namespace with a
+          # segment of that name shadows it and 'LLVM.LLVMAddFunction(...)'
+          # reads as the namespace - which does not compile. LlvmC is a
+          # different word rather than the same one differently cased, and says
+          # which library is on the other side.
           ClangSharpPInvokeGenerator \
             $(for one in $headers; do echo --file "$one"; done) \
             $(for one in $headers; do echo --traverse "$one"; done) \
@@ -301,7 +342,7 @@ jobs:
             --include-directory "$include" \
             --resource-directory "$resource" \
             --output bindings \
-            --namespace LLVM.Interop \
+            --namespace LlvmC.Interop \
             --library-path LLVM-C \
             --method-class-name LLVM \
             --config codegen=latest file=multi \
@@ -316,6 +357,72 @@ jobs:
             echo "the generator did not read every header"
             exit 1
           fi
+
+      # The same again for lld, whose C interface this run built. It is one
+      # header rather than thirty, so none of what the LLVM ones need applies -
+      # nothing is repeated and nothing is declared by a macro - and it goes
+      # into a namespace and a class of its own beside them.
+      - name: Read the declarations out of the shim's header
+        run: |
+          include="$PWD/llvm/include"
+          resource=$(clang -print-resource-dir)
+
+          ClangSharpPInvokeGenerator \
+            --file "$include/lld-c/Driver.h" \
+            --traverse "$include/lld-c/Driver.h" \
+            --file-directory "$include" \
+            --include-directory "$include" \
+            --resource-directory "$resource" \
+            --output bindings \
+            --namespace LldC.Interop \
+            --library-path lld-c \
+            --method-class-name LLD \
+            --config codegen=latest file=multi \
+            2>&1 | tee shim-generator.log || true
+
+          if grep -q '^Skipping \|^    Error ' shim-generator.log; then
+            echo "the generator did not read the shim's header"
+            exit 1
+          fi
+
+      # What comes out does not compile, for two reasons that have nothing to
+      # do with each other: every declaration is emitted once per header that
+      # pulled it in, and the target-initialising functions are called by the
+      # wrappers and declared by no header at all. Both are dealt with here so
+      # that no project using these has to work them out again. The script says
+      # why in full.
+      #
+      # The namespace is told to it rather than read off a file, there being two
+      # of them now and the target-initialising declarations belonging with
+      # LLVM's.
+      - name: Make them compile
+        run: python3 .github/scripts/prepare-bindings.py bindings "$TARGETS" LlvmC.Interop
+
+      # Building them here is what makes the two fixes above a checked claim
+      # rather than a hope. A generator that changes what it emits, or a target
+      # list nobody thought about, fails in this run instead of in whatever
+      # project unpacks the asset next.
+      - name: Check they compile
+        run: |
+          mkdir -p check
+          cd check
+
+          cat > check.csproj <<'END'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+              <Nullable>disable</Nullable>
+              <NoWarn>CS0108;CS0109;CS0169;CS0649;CS8981</NoWarn>
+              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+            </PropertyGroup>
+            <ItemGroup>
+              <Compile Include="../bindings/*.cs" />
+            </ItemGroup>
+          </Project>
+          END
+
+          dotnet build --nologo
 
       - name: Say what came out
         run: echo "$(ls bindings | wc -l) files, $(grep -rh DllImport bindings | wc -l) declarations"
@@ -337,8 +444,7 @@ jobs:
     needs: [version, build, bindings]
     runs-on: ubuntu-latest
     # Whatever was built is worth releasing. A machine that failed is a machine
-    # to look at, not a reason to throw away the ones that worked - and the
-    # bindings being skipped is a choice rather than a failure.
+    # to look at, not a reason to throw away the ones that worked.
     if: always() && needs.build.result == 'success'
 
     steps:
@@ -353,18 +459,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
-          DRAFT: ${{ inputs.draft && '--draft' || '' }}
-          NOTES: "LLVM ${{ needs.version.outputs.version }}. Back ends: ${{ inputs.targets }}. Projects: ${{ inputs.projects }}. System libraries: ${{ inputs.system-libraries && 'on' || 'off' }}. No tools. Each asset unpacks to an 'llvm' install prefix - point CMAKE_PREFIX_PATH at it."
+          NOTES: "LLVM ${{ needs.version.outputs.version }}. Back ends: ${{ env.TARGETS }}. Projects: ${{ env.PROJECTS }}. No system libraries, no tools. Each asset unpacks to an 'llvm' install prefix - point CMAKE_PREFIX_PATH at it."
         run: |
           # Building the same version twice is an ordinary thing to do - a
-          # machine failed, or an option changed - so the second run replaces
-          # what the first put out rather than refusing.
+          # machine failed, or something here changed - so the second run
+          # replaces what the first put out rather than refusing.
           if gh release view "$VERSION" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$VERSION" built/*.tar.zst --repo "$REPOSITORY" --clobber
           else
             gh release create "$VERSION" built/*.tar.zst \
               --repo "$REPOSITORY" \
               --title "LLVM $VERSION" \
-              --notes "$NOTES" \
-              $DRAFT
+              --notes "$NOTES"
           fi
