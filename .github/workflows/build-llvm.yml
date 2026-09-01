@@ -315,7 +315,7 @@ jobs:
           include="$PWD/llvm/include"
           headers=$(find "$include/llvm-c" -name '*.h' | sort)
 
-          mkdir -p bindings
+          mkdir -p bindings/llvm-c
 
           # libclang carries no builtin headers of its own, so without the
           # resource directory of an installed clang every header that reaches
@@ -341,7 +341,7 @@ jobs:
             --file-directory "$include" \
             --include-directory "$include" \
             --resource-directory "$resource" \
-            --output bindings \
+            --output bindings/llvm-c \
             --namespace LlvmC.Interop \
             --library-path LLVM-C \
             --method-class-name LLVM \
@@ -359,13 +359,23 @@ jobs:
           fi
 
       # The same again for lld, whose C interface this run built. It is one
-      # header rather than thirty, so none of what the LLVM ones need applies -
-      # nothing is repeated and nothing is declared by a macro - and it goes
-      # into a namespace and a class of its own beside them.
+      # header rather than thirty, so none of what the LLVM ones need applies:
+      # nothing is repeated and nothing is declared by a macro.
+      #
+      # **A directory of its own, and that is not tidiness.** The generator
+      # emits helper types - NativeTypeName above all, which every declaration
+      # it writes carries - into whichever namespace it was told. Two sets
+      # sharing a directory gives one of two failures: with helper types asked
+      # for twice, the second NativeTypeNameAttribute.cs writes over the first;
+      # asked for once, the set that did not get them cannot see the attribute,
+      # it being internal to the other namespace. The second is what the first
+      # run out of this workflow hit.
       - name: Read the declarations out of the shim's header
         run: |
           include="$PWD/llvm/include"
           resource=$(clang -print-resource-dir)
+
+          mkdir -p bindings/lld-c
 
           ClangSharpPInvokeGenerator \
             --file "$include/lld-c/Driver.h" \
@@ -373,11 +383,12 @@ jobs:
             --file-directory "$include" \
             --include-directory "$include" \
             --resource-directory "$resource" \
-            --output bindings \
+            --output bindings/lld-c \
             --namespace LldC.Interop \
             --library-path lld-c \
             --method-class-name LLD \
             --config codegen=latest file=multi \
+            --generate helper-types \
             2>&1 | tee shim-generator.log || true
 
           if grep -q '^Skipping \|^    Error ' shim-generator.log; then
@@ -396,7 +407,7 @@ jobs:
       # of them now and the target-initialising declarations belonging with
       # LLVM's.
       - name: Make them compile
-        run: python3 .github/scripts/prepare-bindings.py bindings "$TARGETS" LlvmC.Interop
+        run: python3 .github/scripts/prepare-bindings.py bindings/llvm-c "$TARGETS" LlvmC.Interop
 
       # Building them here is what makes the two fixes above a checked claim
       # rather than a hope. A generator that changes what it emits, or a target
@@ -417,7 +428,7 @@ jobs:
               <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
             </PropertyGroup>
             <ItemGroup>
-              <Compile Include="../bindings/*.cs" />
+              <Compile Include="../bindings/**/*.cs" />
             </ItemGroup>
           </Project>
           END
@@ -425,7 +436,7 @@ jobs:
           dotnet build --nologo
 
       - name: Say what came out
-        run: echo "$(ls bindings | wc -l) files, $(grep -rh DllImport bindings | wc -l) declarations"
+        run: echo "$(find bindings -name '*.cs' | wc -l) files, $(grep -rh DllImport bindings | wc -l) declarations"
 
       - name: Wrap them up
         env:
