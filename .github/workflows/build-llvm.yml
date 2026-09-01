@@ -407,7 +407,7 @@ jobs:
       # of them now and the target-initialising declarations belonging with
       # LLVM's.
       - name: Make them compile
-        run: python3 .github/scripts/prepare-bindings.py bindings/llvm-c "$TARGETS" LlvmC.Interop
+        run: python3 .github/scripts/prepare-bindings.py bindings "$TARGETS" LlvmC.Interop
 
       # Building them here is what makes the two fixes above a checked claim
       # rather than a hope. A generator that changes what it emits, or a target
