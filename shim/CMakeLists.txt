@@ -19,6 +19,18 @@ find_package(LLD REQUIRED CONFIG)
 
 message(STATUS "lld-c: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 
+function(compiled_the_way_llvm_was target)
+  if(LLVM_ENABLE_RTTI)
+    return()
+  endif()
+
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /GR-)
+  else()
+    target_compile_options(${target} PRIVATE -fno-rtti)
+  endif()
+endfunction()
+
 add_library(lld-c SHARED lld_c.cpp)
 
 target_include_directories(lld-c
@@ -27,6 +39,8 @@ target_include_directories(lld-c
   PRIVATE ${LLVM_INCLUDE_DIRS} ${LLD_INCLUDE_DIRS})
 
 target_compile_definitions(lld-c PRIVATE ${LLVM_DEFINITIONS})
+
+compiled_the_way_llvm_was(lld-c)
 
 # lld's own version is behind lld/Common/Version.inc, which LLVM generates into
 # its build tree and does not install - so an installed prefix cannot reach it.
@@ -112,6 +126,9 @@ target_include_directories(pdb-c
   PRIVATE ${LLVM_INCLUDE_DIRS})
 
 target_compile_definitions(pdb-c PRIVATE ${LLVM_DEFINITIONS})
+
+compiled_the_way_llvm_was(pdb-c)
+
 target_compile_definitions(pdb-c PRIVATE PDB_C_VERSION="${LLVM_PACKAGE_VERSION}")
 target_compile_definitions(pdb-c PRIVATE PDB_C_BUILDING=1)
 
