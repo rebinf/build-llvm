@@ -12,7 +12,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(lld-c LANGUAGES CXX)
+project(arizmo-shims LANGUAGES CXX)
 
 find_package(LLVM REQUIRED CONFIG)
 find_package(LLD REQUIRED CONFIG)
@@ -86,6 +86,49 @@ target_link_libraries(lld-c PRIVATE ${COMPONENTS})
 include(GNUInstallDirs)
 
 install(TARGETS lld-c
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# A C interface to reading a PDB, which LLVM offers none of either.
+#
+# The same gap as lld's and filled the same way: llvm::pdb and the CodeView
+# readers are templates, ArrayRef and Expected all through, in static libraries
+# rather than the shared one, so nothing outside C++ can read a PDB however
+# well it can reach the rest of LLVM. A debugger has to.
+#
+# Built here rather than wherever a debugger is written, for the reasons above:
+# one build per platform, no C++ toolchain downstream, and a reader that cannot
+# be a version behind the LLVM whose format it reads.
+#
+# The native reader rather than the DIA one, so it answers on a machine with no
+# Visual Studio on it - which is also what lets the LLVM under it be built
+# without the DIA SDK, as this one is.
+add_library(pdb-c SHARED pdb_c.cpp)
+
+target_include_directories(pdb-c
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>
+  PRIVATE ${LLVM_INCLUDE_DIRS})
+
+target_compile_definitions(pdb-c PRIVATE ${LLVM_DEFINITIONS})
+target_compile_definitions(pdb-c PRIVATE PDB_C_VERSION="${LLVM_PACKAGE_VERSION}")
+target_compile_definitions(pdb-c PRIVATE PDB_C_BUILDING=1)
+
+set_target_properties(pdb-c PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
+  WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+
+llvm_map_components_to_libnames(PDB_COMPONENTS
+  BinaryFormat DebugInfoCodeView DebugInfoMSF DebugInfoPDB Object Support
+  TargetParser)
+
+target_link_libraries(pdb-c PRIVATE ${PDB_COMPONENTS})
+
+install(TARGETS pdb-c
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

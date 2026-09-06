@@ -34,6 +34,24 @@ Six machines: Windows, Linux and macOS, each on x64 and arm64.
 The latest LLVM release, X86 and AArch64, with lld, without zlib/zstd/libxml2,
 without the DIA SDK, and without tools. The workflow says why for each.
 
+## reading a PDB gets one too, for the same reason
+
+`llvm::pdb` and the CodeView readers are C++ only - templates, `ArrayRef` and
+`Expected` all through the surface, in static libraries rather than the shared
+one - so nothing outside C++ can read a PDB, however well it can reach the rest
+of LLVM through `llvm-c`. A debugger has to: which addresses a line turns into,
+which line an address came from, which function it is in, and what is being
+held around it.
+
+`shim/pdb_c.cpp` with `include/pdb-c/PdbReader.h` beside `include/lld-c`. It
+reads the whole file once into tables sorted by address, because a debugger
+asks these questions on every stop, every step and every frame.
+
+**The native reader, never DIA.** That is what lets it answer on a machine with
+no Visual Studio on it, and it is what lets the LLVM under it keep being built
+without the DIA SDK - which this build already is, for the reason two sections
+down.
+
 ## Two things the run checks before releasing anything
 
 Both were found by a project trying to use the 23.1.0 assets, hours after the
