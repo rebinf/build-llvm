@@ -275,6 +275,67 @@ jobs:
           # minutes and saves nothing.
           compression-level: 0
 
+  # LLVM and lld built to run as WebAssembly, under WASI, rather than to
+  # compile for it: what a compiler running in a browser links into itself.
+  #
+  # Everything is in one archive - LLVM, lld, the C interface to lld, and the
+  # C and C++ libraries they are written against - because a program there
+  # cannot load anything beside it. The script says why each part is the way
+  # it is, and the patch it applies says where that comes from.
+  #
+  # Only the WebAssembly back end, whatever TARGETS says: a compiler in a
+  # browser has nothing to run a program for any other machine on.
+  wasi:
+    name: wasm32-wasi
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      # The SDK whose C and C++ libraries go into the archive. A newer one is
+      # a change to make on purpose, with a run to show it still builds.
+      WASI_SDK: 34
+
+    steps:
+      - name: Take this repository, for the shim, the patch and the script
+        uses: actions/checkout@v7
+        with:
+          path: build-llvm
+
+      - name: Take the LLVM this run is for
+        uses: actions/checkout@v7
+        with:
+          repository: llvm/llvm-project
+          ref: ${{ needs.version.outputs.tag }}
+          path: llvm-project
+
+      - name: Fetch the WASI SDK
+        run: |
+          curl -sSL -o wasi-sdk.tar.gz "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK/wasi-sdk-$WASI_SDK.0-x86_64-linux.tar.gz"
+          mkdir wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C wasi-sdk --strip-components=1
+
+      - name: Build it
+        run: bash build-llvm/.github/scripts/build-for-wasi.sh llvm-project wasi-sdk work build-llvm "${{ needs.version.outputs.version }}"
+
+      - name: Wrap it up
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          asset="llvm-$VERSION-wasm32-wasi.tar.zst"
+
+          tar -c -C work llvm-wasi | zstd -19 -T0 -o "$asset"
+          zstd -dc "$asset" | tar -t > /dev/null
+
+          ls -la "$asset"
+
+      - name: Hand it over
+        uses: actions/upload-artifact@v7
+        with:
+          name: llvm-wasm32-wasi
+          path: llvm-${{ needs.version.outputs.version }}-wasm32-wasi.tar.zst
+          compression-level: 0
+
   # The declarations a C# caller of the C API needs, read out of the headers
   # this run just built rather than taken from a package that tracks its own
   # version. That is the point of doing it here: the declarations and the
@@ -452,7 +513,7 @@ jobs:
 
   release:
     name: Release
-    needs: [version, build, bindings]
+    needs: [version, build, bindings, wasi]
     runs-on: ubuntu-latest
     # Whatever was built is worth releasing. A machine that failed is a machine
     # to look at, not a reason to throw away the ones that worked.

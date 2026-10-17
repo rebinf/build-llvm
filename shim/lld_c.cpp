@@ -12,7 +12,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#if !defined(__wasi__)
 #include <mutex>
+#endif
 #include <string>
 #include <vector>
 
@@ -57,7 +59,39 @@ namespace
     /// caller gets the guarantee, including the ones that never thought to ask
     /// for it: a build running its projects in parallel, or an editor building
     /// while it answers questions about something else.
+#if defined(__wasi__)
+    /// WASI gives a program one thread, and its C++ library has no mutex for
+    /// that reason: there is nobody else to wait for.
+    struct OnlyThread
+    {
+        void lock() {}
+        void unlock() {}
+    };
+
+    OnlyThread oneLinkAtATime;
+
+    using Lock = OnlyThread;
+#else
     std::mutex oneLinkAtATime;
+
+    using Lock = std::mutex;
+#endif
+
+    /// Holds the lock for as long as it lives.
+    struct Holding
+    {
+        Lock& held;
+
+        explicit Holding(Lock& lock) : held(lock)
+        {
+            held.lock();
+        }
+
+        ~Holding()
+        {
+            held.unlock();
+        }
+    };
 
     /// Every driver this library was built with, in the order they are offered.
     const std::vector<lld::DriverDef>& driversBuiltIn()
@@ -230,7 +264,7 @@ extern "C"
             return nothingToLink(StandardOutput, StandardError, "the linker was given no arguments");
         }
 
-        std::lock_guard<std::mutex> onlyOne(oneLinkAtATime);
+        Holding onlyOne(oneLinkAtATime);
 
         Written written(StandardError);
 
@@ -269,7 +303,7 @@ extern "C"
             return nothingToLink(StandardOutput, StandardError, "this lld was built without that driver");
         }
 
-        std::lock_guard<std::mutex> onlyOne(oneLinkAtATime);
+        Holding onlyOne(oneLinkAtATime);
 
         Written written(StandardError);
 

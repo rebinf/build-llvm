@@ -34,6 +34,25 @@ Six machines: Windows, Linux and macOS, each on x64 and arm64.
 The latest LLVM release, X86, AArch64 and WebAssembly, with lld, without zlib/zstd/libxml2,
 without the DIA SDK, and without tools. The workflow says why for each.
 
+## and LLVM built to run as WebAssembly
+
+One more asset, `llvm-<version>-wasm32-wasi.tar.zst`, is LLVM and lld built to
+*run* in WebAssembly under WASI, not to compile for it: what a compiler running
+in a browser links into itself. It unpacks to `llvm-wasi/`, holding
+`lib/libLLVM-wasi.a` and the C headers.
+
+**One archive with everything in it**, because a program there loads nothing
+beside it: LLVM, lld, the C interface to lld, a few stand-ins for what WASI has
+not got (`shim/wasi_stubs.c`), and the C and C++ libraries from the WASI SDK. A
+linker takes only the members something asks for, so a consumer names one file
+and pays for nothing it does not use. Only the WebAssembly back end is in it.
+
+**LLVM does not build for WASI as released.** `patches/wasi-llvm-<version>.patch`
+is the patch [YoWASP](https://github.com/YoWASP/llvm-project) carries to make it
+build, put onto the version this repository builds; the patch's own header says
+how to bring it to a new one. `.github/scripts/build-for-wasi.sh` is the whole
+build, and runs the same on a developer's Linux as in the workflow.
+
 ## reading a PDB gets one too, for the same reason
 
 `llvm::pdb` and the CodeView readers are C++ only - templates, `ArrayRef` and
