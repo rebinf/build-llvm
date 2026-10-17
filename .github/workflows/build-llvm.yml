@@ -8,11 +8,11 @@
 #
 # **There is nothing to choose when running it.** It was written with an input
 # for everything opinionated, and every one of them has been settled: the
-# latest LLVM, X86 and AArch64, lld, no system libraries, bindings, and a
-# release rather than a draft. What that bought was a run where the only way to
-# get the wrong asset was to fill the form in wrong - which happened - against
-# nothing, since nobody wanted any other combination. Anyone who does can edit
-# the two lines below, in a commit that says why.
+# latest LLVM, X86, AArch64 and WebAssembly, lld, no system libraries,
+# bindings, and a release rather than a draft. What that bought was a run where
+# the only way to get the wrong asset was to fill the form in wrong - which
+# happened - against nothing, since nobody wanted any other combination.
+# Anyone who does can edit the two lines below, in a commit that says why.
 name: Build LLVM
 
 on:
@@ -25,7 +25,7 @@ env:
   # Semicolon separated, or 'all'. What is not built here is a triple the
   # result takes and then says it knows nothing of, so this is what "can be
   # compiled for" comes to for whoever uses it.
-  TARGETS: X86;AArch64
+  TARGETS: X86;AArch64;WebAssembly
 
   # lld, so a project linking through it needs no linker of its own.
   PROJECTS: lld

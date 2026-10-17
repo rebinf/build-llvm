@@ -31,7 +31,7 @@ shim that cannot be a version behind the LLVM it wraps.
 
 Six machines: Windows, Linux and macOS, each on x64 and arm64.
 
-The latest LLVM release, X86 and AArch64, with lld, without zlib/zstd/libxml2,
+The latest LLVM release, X86, AArch64 and WebAssembly, with lld, without zlib/zstd/libxml2,
 without the DIA SDK, and without tools. The workflow says why for each.
 
 ## reading a PDB gets one too, for the same reason
